@@ -2,7 +2,7 @@
 
 - 메인 페이지가 작성되었습니다.
 
-[테스트](###2020-09-25-릴리즈-노트)
+[테스트](#2020-09-25-Release-Note)
 
 ## 릴리즈 노트
 
@@ -26,6 +26,6 @@ Fusce nec massa at arcu ultricies lobortis. Nulla tempus aliquam orci, ac sceler
 
 Donec id ante urna. Vestibulum blandit bibendum risus eget sodales. Suspendisse lectus est, fermentum et aliquet sit amet, commodo volutpat tellus. Duis consequat vehicula risus a tristique. Donec rhoncus cursus vehicula. Maecenas nec ultricies dui, vel gravida mi. Nullam in ex sit amet risus volutpat imperdiet ut sed nulla. Aenean sit amet iaculis odio. Donec faucibus justo diam, quis auctor magna porta eget. In pretium commodo orci sit amet cursus. Donec ultricies vitae orci in iaculis.
 
-### 2020-09-25 릴리즈 노트
+### 2020-09-25 Release Note
 
 테스트 합니다.
