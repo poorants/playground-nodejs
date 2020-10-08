@@ -1,2 +1,3 @@
-import fs from "fs";
-console.log("hello world");
+import ObjectControll from "./playground/object-controll";
+
+ObjectControll.main();

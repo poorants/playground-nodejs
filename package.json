@@ -5,7 +5,7 @@
   "main": "app.js",
   "scripts": {
     "local": "babel-node",
-    "serve": "babel-node app.js"
+    "serve": "nodemon --exec babel-node app.js"
   },
   "repository": {
     "type": "git",
@@ -22,5 +22,9 @@
     "@babel/core": "^7.11.6",
     "@babel/node": "^7.10.5",
     "@babel/preset-env": "^7.11.5"
+  },
+  "dependencies": {
+    "axios": "^0.20.0",
+    "nodemon": "^2.0.4"
   }
 }
