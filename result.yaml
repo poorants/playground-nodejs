@@ -1,0 +1,238 @@
+paths:
+  /init:
+    delete}:
+      tags:
+      - /init
+      summary:
+  /home:
+    get:
+      tags:
+      - /home
+      summary:
+  /accessHome:
+    get:
+      tags:
+      - /accessHome
+      summary:
+  /sqlTools:
+    get:
+      tags:
+      - /sqlTools
+      summary:
+  /fileCipherHome:
+    get:
+      tags:
+      - /fileCipherHome
+      summary:
+  /fingerHome:
+    get:
+      tags:
+      - /fingerHome
+      summary:
+  /initContPage:
+    :
+      tags:
+      - /initContPage
+      summary:
+  /initSettingsContent:
+    :
+      tags:
+      - /initSettingsContent
+      summary:
+  /login:
+    post:
+      tags:
+      - /login
+      summary:
+  /logout:
+    delete:
+      tags:
+      - /logout
+      summary:
+  /admin/history:
+    post:
+      tags:
+      - /admin/history
+      summary:
+  /login/cert:
+    post:
+      tags:
+      - /login/cert
+      summary:
+    delete:
+      tags:
+      - /login/cert
+      summary:
+    patch:
+      tags:
+      - /login/cert
+      summary:
+  /login/cert/parse:
+    get:
+      tags:
+      - /login/cert
+      summary:
+  /login/cert/import:
+    get:
+      tags:
+      - /login/cert
+      summary:
+  /login/user/name/exists:
+    get:
+      tags:
+      - /login/user
+      summary:
+  /login/user:
+    post:
+      tags:
+      - /login/user
+      summary:
+  /login/user/mail:
+    patch:
+      tags:
+      - /login/user
+      summary:
+    get:
+      tags:
+      - /login/user
+      summary:
+  /login/org:
+    get:
+      tags:
+      - /login/org
+      summary:
+  /login/user/request/status:
+    get:
+      tags:
+      - /login/user
+      summary:
+  /settings/publicKey:
+    get:
+      tags:
+      - /settings/publicKey
+      summary:
+    post:
+      tags:
+      - /settings/publicKey
+      summary:
+    delete:
+      tags:
+      - /settings/publicKey
+      summary:
+  /settings/publicKey/import:
+    post:
+      tags:
+      - /settings/publicKey
+      summary:
+  /settings/encrypt/parameter:
+    get:
+      tags:
+      - /settings/encrypt
+      summary:
+    post:
+      tags:
+      - /settings/encrypt
+      summary:
+    patch:
+      tags:
+      - /settings/encrypt
+      summary:
+    delete:
+      tags:
+      - /settings/encrypt
+      summary:
+  /settings/encrypt/parameter/validate:
+    get:
+      tags:
+      - /settings/encrypt
+      summary:
+  /settings/encrypt/parameter/import:
+    post:
+      tags:
+      - /settings/encrypt
+      summary:
+  /dbProperties:
+    post:
+      tags:
+      - /dbProperties
+      summary:
+  /emergencyExit:
+    post:
+      tags:
+      - /emergencyExit
+      summary:
+  /login/clientDownload:
+    post:
+      tags:
+      - /login/clientDownload
+      summary:
+  /common/connectionInfo:
+    get:
+      tags:
+      - /common/connectionInfo
+      summary:
+  /login/getSessionId:
+    post:
+      tags:
+      - /login/getSessionId
+      summary:
+  /post/test:
+    post:
+      tags:
+      - /post/test
+      summary:
+  /get/test:
+    get:
+      tags:
+      - /get/test
+      summary:
+  /common/test/ping:
+    get:
+      tags:
+      - /common/test
+      summary:
+  /common/test/connect:
+    get:
+      tags:
+      - /common/test
+      summary:
+  /common/create/hv:
+    get:
+      tags:
+      - /common/create
+      summary:
+  /login/insertDownloadStat:
+    get:
+      tags:
+      - /login/insertDownloadStat
+      summary:
+  /login/getDownloadStat:
+    get:
+      tags:
+      - /login/getDownloadStat
+      summary:
+  /table_test1:
+    delete}:
+      tags:
+      - /table_test1
+      summary:
+  /table_test2:
+    delete}:
+      tags:
+      - /table_test2
+      summary:
+  /cipher/enc/sha:
+    get:
+      tags:
+      - /cipher/enc
+      summary:
+  /cipher/enc/aria:
+    get:
+      tags:
+      - /cipher/enc
+      summary:
+  /cipher/dec/aria:
+    get:
+      tags:
+      - /cipher/dec
+      summary:

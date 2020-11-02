@@ -1,3 +1,10 @@
 import ObjectControll from "./playground/object-controll";
+import SyncAsync from "./playground/sync-async"
+import DocumentGetter from './playground/document-getter'
 
-ObjectControll.main();
+// SyncAsync.sync()
+// SyncAsync.async()
+
+
+
+DocumentGetter.main('./data/Editor.java', './result.yaml')

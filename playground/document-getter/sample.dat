@@ -1,0 +1,1547 @@
+package com.sinsiway.petra.editor.controller;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.Reader;
+
+//import static org.hamcrest.CoreMatchers.instanceOf;
+
+import java.net.InetAddress;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.net.UnknownHostException;
+import java.sql.Connection;
+import java.sql.Driver;
+import java.sql.SQLException;
+import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpSession;
+import javax.xml.bind.DatatypeConverter;
+
+import org.apache.ibatis.io.Resources;
+import org.apache.ibatis.session.SqlSession;
+import org.apache.ibatis.session.SqlSessionFactory;
+import org.apache.ibatis.session.SqlSessionFactoryBuilder;
+import org.codehaus.jackson.JsonParseException;
+import org.codehaus.jackson.map.JsonMappingException;
+import org.codehaus.jackson.map.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.env.Environment;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.multipart.MultipartHttpServletRequest;
+import org.springframework.web.servlet.ModelAndView;
+
+import com.mongodb.session.SessionContext;
+import com.sinsiway.petra.cipher.util.PcaException;
+import com.sinsiway.petra.cipher.util.PcaSessionPool;
+import com.sinsiway.petra.common.code.CommonCodes;
+import com.sinsiway.petra.common.code.ErrorCodes;
+import com.sinsiway.petra.common.dto.DatabaseDto;
+import com.sinsiway.petra.common.dto.JdbcDriverDto;
+import com.sinsiway.petra.common.service.CommonService;
+import com.sinsiway.petra.common.util.CommonUtils;
+import com.sinsiway.petra.common.util.Converter;
+import com.sinsiway.petra.common.util.FileLoader;
+import com.sinsiway.petra.common.util.PetraConnectionManager;
+import com.sinsiway.petra.common.util.PetraLargeResultManager;
+import com.sinsiway.petra.common.util.SessionContextHolder;
+import com.sinsiway.petra.common.util.SqlFormatterUtil;
+import com.sinsiway.petra.common.util.StringUtils;
+import com.sinsiway.petra.common.util.TransactionManager;
+import com.sinsiway.petra.editor.dto.ExecDocDto;
+import com.sinsiway.petra.editor.dto.ExecuteResultDto;
+import com.sinsiway.petra.editor.dto.PdstApiParamDto;
+import com.sinsiway.petra.editor.dto.PdstRestApiDto;
+import com.sinsiway.petra.editor.service.EditorService;
+import com.sinsiway.petra.editor.service.SQLTextUtil;
+import com.sinsiway.petra.editor.service.SQLTransactionManager;
+import com.sinsiway.petra.mail.service.MailSendServiceImpl;
+
+/**
+ * Handles requests for the application home page.
+ */
+@Controller
+public class EditorController {
+	
+	private static final Logger logger = LoggerFactory.getLogger(EditorController.class);
+	
+	@Autowired 
+	private EditorService editorService;
+	
+	@Autowired
+	private MailSendServiceImpl mailSendService;
+	
+	@Autowired 
+	private CommonService commonService;
+	
+	// 1 
+	@RequestMapping(value = "/restapi/**", method = RequestMethod.GET, produces={"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<String> getRestAPI(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Map<String, String> queryStrMap = StringUtils.getInstance().queryStrToMap(request.getQueryString());
+        
+		requestMap.put("REQ_TYPE", 0);
+		requestMap.put("URI", request.getServletPath().replace("/restapi/",""));
+		requestMap.put("AUTH_KEY", request.getHeader("Authorization"));
+		
+		Object result = editorService.getRestApi(requestMap);
+		if(result == null) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), "접속 정보 및 인증키가 올바르지 않습니다."), HttpStatus.BAD_REQUEST);
+		}
+		
+		PdstRestApiDto apiData = (PdstRestApiDto) result;
+		String sql = apiData.getSQL_TEXT();
+		requestMap.put("API_ID", apiData.getAPI_ID());
+		result = editorService.getApiCondition(requestMap);
+		if(result != null) {
+			List<PdstApiParamDto> condList = (ArrayList<PdstApiParamDto>)result;
+			for(PdstApiParamDto data : condList) {
+				String key = data.getPARAM_NAME();
+				if(queryStrMap.containsKey(key)) {
+					int idx = -1;
+					while(sql.indexOf("{"+key+"}") > 0) {
+						idx = sql.indexOf("{"+key+"}");
+						sql = sql.substring(0, idx) + queryStrMap.get(key) +  sql.substring(idx + key.length() + 2); 
+					}
+				}else {
+					if(data.getREQUIRED_FLAG() == 1) {
+						return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), "["+key+"] 조건은 필수 사항입니다."), HttpStatus.PRECONDITION_REQUIRED);
+					}
+				}
+			}
+		}
+		
+		requestMap.put("DB_TYPE", apiData.getDB_TYPE());
+		requestMap.put("SID_FLAG", apiData.getSID_FLAG());
+		requestMap.put("SERVICE_NAME", apiData.getSERVICE_NAME());
+		requestMap.put("IP", apiData.getIP());
+		requestMap.put("PORT", apiData.getPORT());
+		requestMap.put("USER_NAME", apiData.getUSER_NAME());
+		requestMap.put("PASSWORD", apiData.getPASSWORD());
+		requestMap.put("DRIVER_FILE_NAME", apiData.getDRIVER_FILE_NAME());
+		requestMap.put("DRIVER_CLASS_NAME", apiData.getDRIVER_CLASS_NAME());
+		requestMap.put("JDBC_URL_OPT", apiData.getJDBC_URL_OPT());
+		
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		requestMap.put("SQL", sql);
+		result = editorService.restApiSelect(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 2 
+	@RequestMapping(value = "/restapi/**", method = {RequestMethod.DELETE, RequestMethod.PUT, RequestMethod.POST}, produces={"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<String> etcRestAPI(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		int reqType = 0;
+		if(request.getMethod().equals("POST")) {
+			reqType = 1;
+		}else if(request.getMethod().equals("PUT")) {
+			reqType = 2;
+		}else if(request.getMethod().equals("DELETE")) {
+			reqType = 3;
+		}
+		
+		requestMap.put("REQ_TYPE", reqType);
+		requestMap.put("URI", request.getServletPath().replace("/restapi/",""));
+		requestMap.put("AUTH_KEY", request.getHeader("Authorization"));
+		
+		Object result = editorService.getRestApi(requestMap);
+		if(result == null) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}
+		
+		PdstRestApiDto apiData = (PdstRestApiDto) result;
+		String sql = apiData.getSQL_TEXT();
+		requestMap.put("API_ID", apiData.getAPI_ID());
+		result = editorService.getApiCondition(requestMap);
+		if(result != null) {
+			List<PdstApiParamDto> condList = (ArrayList<PdstApiParamDto>)result;
+			for(PdstApiParamDto data : condList) {
+				String key = data.getPARAM_NAME();
+				if(requestMap.containsKey(key)) {
+					int idx = -1;
+					while(sql.indexOf("{"+key+"}") > 0) {
+						idx = sql.indexOf("{"+key+"}");
+						sql = sql.substring(0, idx) + requestMap.get(key) +  sql.substring(idx + key.length() + 2); 
+					}
+				}else {
+					if(data.getREQUIRED_FLAG() == 1) {
+						return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), "["+key+"] 조건은 필수 사항입니다."), HttpStatus.PRECONDITION_REQUIRED);
+					}
+				}
+			}
+		}
+		
+		requestMap.put("DB_TYPE", apiData.getDB_TYPE());
+		requestMap.put("SID_FLAG", apiData.getSID_FLAG());
+		requestMap.put("SERVICE_NAME", apiData.getSERVICE_NAME());
+		requestMap.put("IP", apiData.getIP());
+		requestMap.put("PORT", apiData.getPORT());
+		requestMap.put("USER_NAME", apiData.getUSER_NAME());
+		requestMap.put("PASSWORD", apiData.getPASSWORD());
+		requestMap.put("DRIVER_FILE_NAME", apiData.getDRIVER_FILE_NAME());
+		requestMap.put("DRIVER_CLASS_NAME", apiData.getDRIVER_CLASS_NAME());
+		requestMap.put("JDBC_URL_OPT", apiData.getJDBC_URL_OPT());
+		
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		requestMap.put("SQL", sql);
+		
+		if(reqType == 1) {
+			result = editorService.restApiInsert(requestMap);
+		}else if(reqType == 2) {
+			result = editorService.restApiUpdate(requestMap);
+		}else if(reqType == 3) {
+			result = editorService.restApiDelete(requestMap);
+		}
+		
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("result", "affected "+result+" row(s)");
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+
+	
+	// 7 
+	@RequestMapping(value = "/editor/mongodb", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initDbSelect(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getAllDb(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 8 
+	@RequestMapping(value = "/editor/gridfs", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getGridFsFiles(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) throws IOException {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getGridFsFiles(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 9 
+	@RequestMapping(value = "/editor/gridfs", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8", "text/plain;charset=UTF-8"})
+	public ResponseEntity<?> addGridFsFiles(MultipartHttpServletRequest request, @RequestParam("uploadFile") MultipartFile[] uploadFile, @RequestParam("connectionInfo") String connectionInfo) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		Map<String, Object> map = Converter.getInstance().convertJsonStrToMap(connectionInfo);
+		PetraConnectionManager.getInstance().initDBConnection(map);
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("fileSize", uploadFile.length);
+		int failCnt = 0;
+		Object result = null;
+		for(MultipartFile file : uploadFile) {
+			System.out.println(file.getOriginalFilename());
+			result = editorService.addGridFsFiles(file);
+			if(result instanceof Exception) {
+				failCnt++;
+			}
+		}
+		
+		responseData.put("failCount", failCnt);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	// 10 
+	@RequestMapping(value = "/editor/gridfs/preview", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> gridfs(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) throws IOException {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getGridFsPreview(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 11 
+	@RequestMapping(value = "/editor/gridfs", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> deleteGridFsFile(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) throws IOException {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.deleteGridFsFile(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/object/schema", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getSchema(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionData = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		Object result = editorService.getSchema(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		//사용자 세션을 기준으로 기본 연결 connection이외에 편집기에서 실행될  connection 확인하여 생성 
+		if(!TransactionManager.getInstance().contains(SessionContextHolder.getId(), connectionData)) {
+			TransactionManager.getInstance().newSqlSession(SessionContextHolder.getId(), connectionData);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/objectTree/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initObjectTree(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getObjTypeCount(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/objectNodes/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initObjNodes(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+
+		Object result = editorService.initObjNodes(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}	
+	
+	// 14 : Petra UI 테스트 못함. 파라미터명 변경 필요.
+	@RequestMapping(value = "/editor/dbUserCheck", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dbUserCheck(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		boolean result = true;
+		String userName= (String)requestMap.get("userName");	// mjko - 다른 파라미터와 대소문자 등 통일할 필요있음.
+		String password= (String)requestMap.get("password");	// mjko - 다른 파라미터와 대소문자 등 통일할 필요있음.
+//		String userName= (String)requestMap.get("USER_NAME");	
+//		String password= (String)requestMap.get("PASSWORD");
+		
+		/* 현재 입력한 계정이 권한이 있는지 체크하는 필요 */
+		if(userName.contains("toast")&&password.contains("toast")){
+			result = false;
+		}
+
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("returnData", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/db/connection", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dbConnection(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		if(requestMap.containsKey("PROD_TYPE")) {
+			int type = (int) requestMap.get("PROD_TYPE");
+			if(type == 2) {
+				requestMap.put("CLIENT_IP", CommonUtils.getInstance().getIpAddress(request));
+			}
+		}
+		
+		DatabaseDto connectionData = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		if(requestMap.containsKey("PROD_TYPE")) {
+			int type = (int) requestMap.get("PROD_TYPE");
+			if(type == 2) {
+				return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), connectionData ), HttpStatus.OK);			
+			} else {
+				return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), new HashMap<String, Object>()), HttpStatus.OK);
+			}
+		} else {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), new HashMap<String, Object>()), HttpStatus.OK);
+		}
+	}
+
+	// 16 : Petra UI 테스트 못함. null 에러남. RestAPI 문서에 만들어 놓음.
+	@RequestMapping(value = "/editor/dbDisConnection", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dbDisConnection(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		requestMap.put("DIS_CONNECTION_FLAG", true);
+		DatabaseDto databaseDto = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		String sessionId = SessionContextHolder.getId();
+		
+		if(PetraConnectionManager.getInstance().getDBInfo().get(sessionId).containsKey(databaseDto.toString())){
+			requestMap.put("SID", PetraConnectionManager.getInstance().getDBInfo().get(sessionId).get(databaseDto.toString()).getSid());
+			if(!requestMap.get("SID").equals("") && !requestMap.get("SID").equals("0")) {
+				commonService.closeSid(requestMap);
+			}
+
+			PetraConnectionManager.getInstance().disconnection(sessionId, databaseDto.toString());
+			PetraLargeResultManager.getInstance().resultSetClosed(SessionContextHolder.getId());
+		}
+		
+		if(TransactionManager.getInstance().getDBSessionMap().get(sessionId).containsKey(databaseDto.toString())) { // mjko :  null 에러 발생
+			TransactionManager.getInstance().removeSqlSession(sessionId, databaseDto);
+		}
+		
+//		logger.info("### 현재 저장된 DB 커넥션 수 : "+ PetraConnectionManager.getInstance().getDBInfo().get(request.getSession().getId()).size());
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), new HashMap<>()), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/executeQuery", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> executeQuery(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		requestMap.put("CONNECTION_INFO", connectionInfo);
+		
+		int type = Integer.parseInt(requestMap.get("RETRIEVE_TYPE") + "");
+		if(type == 0) {
+			//잔여 조회 있는 메뉴(대량 조회)에 PetraLargeResultManager 관여
+			if(PetraLargeResultManager.getInstance().getResultMap().get(SessionContextHolder.getId()) != null) {
+				PetraLargeResultManager.getInstance().resultSetClosed(SessionContextHolder.getId());
+			}
+		}
+		
+		Object result = editorService.executeQuery(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+
+
+	
+	/* 오브젝트 AutoComplete 테이블 데이터 가져오기*/
+	@RequestMapping(value = "/editor/autoTest", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> autoTest(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.autoCompleteService(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}	
+	
+	
+	@RequestMapping(value = "/editor/template/init", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initTemplate(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getDDLTemplate(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+
+	
+	@RequestMapping(value = "/editor/template/dml", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dml(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getDMLTemplate(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	
+	@RequestMapping(value = "/editor/template/objectDML", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> objectDML(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		int type = (int) requestMap.get("RETRIEVE_TYPE");
+		if(type == 0) {
+			//잔여 조회 있는 메뉴(대량 조회)에 PetraLargeResultManager 관여
+			if(PetraLargeResultManager.getInstance().getResultMap().get(SessionContextHolder.getId()) != null) {
+				PetraLargeResultManager.getInstance().resultSetClosed(request.getSession().getId());
+			}
+		}
+		
+		Object result = editorService.getDMLSyntaxToBuilder(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/dataEditor/dataEditor", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dataEditor(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		int type = Integer.parseInt(requestMap.get("RETRIEVE_TYPE") + "");
+		if(type == 0) {
+			//잔여 조회 있는 메뉴(대량 조회)에 PetraLargeResultManager 관여
+			if(PetraLargeResultManager.getInstance().getResultMap().get(SessionContextHolder.getId()) != null) {
+				PetraLargeResultManager.getInstance().resultSetClosed(SessionContextHolder.getId());
+			}
+		}
+		
+		Object result = editorService.getDataEditorList(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/ddl/ddlScript", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> ddlScript(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getDDLScript(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/ddl/renameTable", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> renameTable(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.runRenameStatement(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/ddl/dropObject", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dropObject(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.runDropStatement(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/db", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getDbmsList(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getDbmsList(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 29 : 이제 사용하지 않는 테이블(PT_DBMS) 사용. 확인 필요.
+	@RequestMapping(value = "/editor/db/dup", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dupDbmsName(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.dupDbmsName(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	// 30 
+	@RequestMapping(value = "/editor/api/dup2", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dupRestApi(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.dupRestApi(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/db", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> addDbms(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.addDbms(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/db", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modDbms(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modDbms(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/db", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> delDbms(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.delDbms(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), new HashMap<>().put("RESULT", result)), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/db/connect", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> connectDbms(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		Object result = PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		if(result instanceof Exception || result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}
+		
+		DatabaseDto connectionData = (DatabaseDto) result;
+		result = commonService.connectionTest(requestMap);
+		if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		//사용자 세션을 기준으로 기본 연결 connection이외에 편집기에서 실행될  connection 확인하여 생성 
+		if(!TransactionManager.getInstance().contains(SessionContextHolder.getId(), connectionData)) {
+			TransactionManager.getInstance().newSqlSession(SessionContextHolder.getId(), connectionData);
+		}
+		
+		SessionContextHolder.remove();
+		
+		requestMap.put("CLIENT_IP", CommonUtils.getInstance().getIpAddress(request));
+		requestMap.put("CLIENT_COMM_IP", CommonUtils.getInstance().getIpAddress(request));
+		
+		if(requestMap.containsKey("CONN_ID")) {
+			result = editorService.connectDbms(requestMap);
+			if(result instanceof Exception) {
+				return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+			} else if(result instanceof ErrorCodes) {
+				return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+			}
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/maintab/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initEditor(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getMainTab(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/maintab/mod", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modMainTab(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modMainTab(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/maintab", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> delMainTab(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.delMainTab(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto databaseDto = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+//		String sessionId = SessionContextHolder.getId();
+//
+//		if(PetraConnectionManager.getInstance().getDBInfo().get(sessionId).containsKey(databaseDto.toString())){
+//			requestMap.put("SID", PetraConnectionManager.getInstance().getDBInfo().get(sessionId).get(databaseDto.toString()).getSid());
+//			PetraConnectionManager.getInstance().initDBConnection(CommonCodes.DATA_STUDIO);
+//			if(!requestMap.get("SID").equals("") && !requestMap.get("SID").equals("0")) {		
+//				commonService.closeSid(requestMap);
+//			}
+//
+//			PetraConnectionManager.getInstance().disconnection(sessionId, databaseDto.toString());
+//			PetraLargeResultManager.getInstance().remove(SessionContextHolder.getId());
+//		}
+		
+		if(PetraConnectionManager.getInstance().getDBInfo().get(SessionContextHolder.getId()).containsKey(databaseDto.toString())){
+			PetraConnectionManager.getInstance().disconnection(SessionContextHolder.getId(), databaseDto.toString());
+		}
+		
+		if(TransactionManager.getInstance().contains(SessionContextHolder.getId(), databaseDto)) {
+			TransactionManager.getInstance().removeSqlSession(SessionContextHolder.getId(), databaseDto);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), new HashMap<>().put("RESULT", result)), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/sql/hist", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getSqlHistoryList(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getSqlHistoryList(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/favorites/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initFavoritesSql(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.initFavoritesSql(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/favorites/add", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> addFavoritesSql(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.addFavoritesSql(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/favorites/mod", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modFavoritesSql(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modFavoritesSql(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/favorites/del", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> delFavoritesSql(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.delFavoritesSql(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/executePlan", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> executePlan(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.getExecutePlan(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+
+	@RequestMapping(value = "/editor/transaction/start", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> startTransaction(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		boolean autoCommit = (boolean) requestMap.get("AUTO_COMMIT");
+		if(TransactionManager.getInstance().contains(SessionContextHolder.getId(), connectionInfo)) {
+			TransactionManager.getInstance().autoCommit(SessionContextHolder.getId(), connectionInfo, autoCommit);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), new HashMap<>()), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/transaction/stop", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> stopTransaction(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		boolean autoCommit = (boolean) requestMap.get("AUTO_COMMIT");
+		if(TransactionManager.getInstance().contains(SessionContextHolder.getId(), connectionInfo)) {
+			TransactionManager.getInstance().autoCommit(SessionContextHolder.getId(), connectionInfo, autoCommit);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/transaction/rollback", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> rollback(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		Object result = TransactionManager.getInstance().rollback(SessionContextHolder.getId(), connectionInfo);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		if(requestMap.containsKey("ID") && requestMap.get("ID").equals("sign")) {
+			result = editorService.rollbackSignExecDynHist(requestMap);
+			if(result instanceof ErrorCodes) {
+				return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+			}
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/transaction/commit", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> commit(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		Object result = TransactionManager.getInstance().commit(SessionContextHolder.getId(), connectionInfo);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		 
+		if(requestMap.containsKey("ID") && requestMap.get("ID").equals("sign")) {
+			result = editorService.commitSignExecDynHist(requestMap);
+			if(result instanceof ErrorCodes) {
+				return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+			}
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+
+	@RequestMapping(value = "/editor/transaction/used", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> usedTransaction(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		boolean usedTransaction = false;
+		try {
+			logger.info("### 트랜잭션 : {}",TransactionManager.getInstance().getSqlSession(SessionContextHolder.getId(), connectionInfo).getConnection().getAutoCommit());
+			
+			if(TransactionManager.getInstance().contains(SessionContextHolder.getId(), connectionInfo)
+					&& !TransactionManager.getInstance().getSqlSession(SessionContextHolder.getId(), connectionInfo).getConnection().getAutoCommit()) {
+				usedTransaction = true;
+			}
+		} catch (SQLException e) {
+			e.printStackTrace();
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), usedTransaction), HttpStatus.OK);
+	}
+
+	@RequestMapping(value = "/editor/transaction/rollbackAndStop", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> rollbackAndStopTransaction(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		DatabaseDto connectionInfo = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+
+		Object result = TransactionManager.getInstance().rollback(SessionContextHolder.getId(), connectionInfo);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		requestMap.put("CONNECTION_INFO", connectionInfo);
+		editorService.switchAutoCommit(requestMap);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), true), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/transactionWorkCount", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> transactionWorkCount(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		String sessionId = SessionContextHolder.getId();
+		int workHistoryCount = 0;
+
+		if(SQLTransactionManager.getInstance().getTransactionInfo().containsKey(sessionId)){
+			for(String databaseDtoToString : SQLTransactionManager.getInstance().getTransactionInfo().get(sessionId).keySet()) {
+				workHistoryCount += SQLTransactionManager.getInstance().getTransactionInfo().get(sessionId).get(databaseDtoToString).getWorkHistoryCount();
+			}
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("returnData", workHistoryCount);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+
+	@RequestMapping(value = "/editor/transaction/target/count", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> transactionTargetCount(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		String sessionId = SessionContextHolder.getId();
+		int workHistoryCount = 0;
+		;
+		DatabaseDto databaseDto = (DatabaseDto) PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		logger.info("### Session 정보 : " + sessionId );
+		if(SQLTransactionManager.getInstance().getTransactionInfo().containsKey(sessionId)){
+			logger.info("### 현재 사용중인 트랜잭션 갯수 : " + SQLTransactionManager.getInstance().getTransactionInfo().get(sessionId).size());
+			for(String key : SQLTransactionManager.getInstance().getTransactionInfo().get(sessionId).keySet()) {
+				logger.info("### 현재 사용중인 트랜잭션 키 : " + key);
+			}
+			if(SQLTransactionManager.getInstance().getTransactionInfo().get(sessionId).containsKey(databaseDto.toString())) {
+				logger.info("### 현재 사용된 트랜잭션 키 : " + databaseDto.toString());
+				workHistoryCount += SQLTransactionManager.getInstance().getTransactionInfo().get(sessionId).get(databaseDto.toString()).getWorkHistoryCount();
+				logger.info("### 현재 사용된 트랜잭션 작업 개수 : " + workHistoryCount);
+			}
+		}
+		boolean isTransaction = false;
+		if(workHistoryCount > 0) {
+			isTransaction = true;
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), isTransaction), HttpStatus.OK);
+	}
+
+	@RequestMapping(value = "/editor/api/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getRestApiList(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getRestApiList(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("returnData", result);
+		try {
+			InetAddress local = InetAddress.getLocalHost();
+			String ip = local.getHostAddress();
+			responseData.put("wasUri", "http://"+ip+":"+request.getServerPort()+request.getContextPath()+"/restapi/");
+		} catch (UnknownHostException e) {
+			e.printStackTrace();
+		} finally {
+			
+		}
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/api/condition/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initApiCondition(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getApiCondition(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+
+	
+	@RequestMapping(value = "/editor/api/dup", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> dupRestApiName(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.dupRestApiName(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/restapi", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> addRestApi(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.addRestApi(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/restapi", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modRestApi(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modRestApi(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/api/name/mod", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modRestApiName(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modRestApiName(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/api/del", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> delRestApi(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.delRestApi(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		} else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("RESULT", result);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+
+	@RequestMapping(value = "/editor/user", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getUserList(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getUserList(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/user", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modUser(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modUser(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 65
+	@RequestMapping(value = "/login/user/recover/id", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> recoverUserId(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.recoverUserId(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 66
+	@RequestMapping(value = "/login/user/recover/pwd", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> recoverUserPwd(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.recoverUserPwd(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		String userName = (String) result;
+		String tmpPwd = CommonUtils.getInstance().randomPwd();
+		requestMap.put("PASSWORD", CommonUtils.getInstance().sha256(tmpPwd));
+		
+		result = editorService.modUserPassword(requestMap);
+		if(result instanceof Exception) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		}else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		String content = mailSendService.getSearchUserPwdContent(userName, requestMap.get("LOGIN_ID").toString(), tmpPwd);
+		mailSendService.sendMail(requestMap.get("EMAIL").toString(), "[Sinsiway] 비밀번호 초기화", content);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/user/password", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modUserPassword(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modUserPassword(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/user/password/init", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> checkInitUserPwd(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.checkInitUserPwd(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 69
+	@RequestMapping(value = "/editor/user/active", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modUserActive(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modUserActive(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 70
+	@RequestMapping(value = "/editor/user/stat", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modUserStat(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modUserStat(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/user/valid", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> validPassword(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.validPassword(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 72
+	@RequestMapping(value = "/editor/user/manager", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> assignManager(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.assignManager(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 73
+	@RequestMapping(value = "/editor/user/manager", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> detractManager(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.detractManager(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 74
+	@RequestMapping(value = "/editor/org", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> addOrg(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.addOrg(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 75
+	@RequestMapping(value = "/editor/org", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modOrg(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modOrg(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 76
+	@RequestMapping(value = "/editor/org", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> delOrg(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.delOrg(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+
+	
+	@RequestMapping(value = "/editor/sqlFormatter", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> sqlFormatter(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+//		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		String prevSql= (String)requestMap.get("SQL");
+		int dbType = Integer.parseInt(requestMap.get("DB_TYPE")+"");
+		
+		Object result = SqlFormatterUtil.applySqlFormatter(dbType, prevSql);
+		
+//		Map<String, Object> responseData = new HashMap<>();
+//		responseData.put("returnData", postSql);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	} 
+	
+	// 82
+	@RequestMapping(value = "/editor/driver", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8", "text/plain;charset=UTF-8"})
+	public ResponseEntity<?> uploadJdbcDriver(MultipartHttpServletRequest request, @RequestParam("uploadDriver") MultipartFile[] uploadFile, @RequestParam("savePath") String savePath) {
+//		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		int successCnt = 0;
+		for(MultipartFile file : uploadFile) {
+			successCnt += FileLoader.getInstance().writeFile(CommonCodes.JDBC_DRIVER_PATH.getMessage()+savePath, file);
+		}
+		
+		Map<String, Object> responseData = new HashMap<>();
+		responseData.put("success", successCnt);
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), responseData), HttpStatus.OK);
+	}
+	
+	// 83
+	@RequestMapping(value = "/editor/driver", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8", "text/plain;charset=UTF-8"})
+	public ResponseEntity<?> getJdbcDriver(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+//		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		File[] files = FileLoader.getInstance().getFiles(request.getServletContext().getRealPath("/")+CommonCodes.JDBC_DRIVER_PATH.getMessage()+requestMap.get("PATH").toString().toLowerCase());
+		if(files == null) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ""), HttpStatus.OK);
+		}
+		
+		List<JdbcDriverDto> resultList = new ArrayList<>();
+		for(File file : files) {
+			JdbcDriverDto data = new JdbcDriverDto();
+			data.setFILE_NAME(file.getName());
+			data.setLAST_MODIFIED(new SimpleDateFormat("yyyy/MM/dd HH:mm:ss").format(file.lastModified()));
+			data.setSIZE(file.length()+"");
+			resultList.add(data);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), resultList), HttpStatus.OK);
+	}
+	
+	// 84
+	@RequestMapping(value = "/editor/driver", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8", "text/plain;charset=UTF-8"})
+	public ResponseEntity<?> delJdbcDriver(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+//		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		String result = FileLoader.getInstance().deleteFile(CommonCodes.JDBC_DRIVER_PATH.getMessage()+requestMap.get("PATH").toString().toLowerCase(), requestMap.get("FILE_NAME").toString());
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+
+	@RequestMapping(value = "/editor/report/schedule", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initReportSchedule(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.initReportSchedule(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 91
+	@RequestMapping(value = "/editor/report/schedule", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> addReportSchedule(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.addReportSchedule(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 92
+	@RequestMapping(value = "/editor/report/schedule", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> modReportSchedule(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.modReportSchedule(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 93
+	@RequestMapping(value = "/editor/report/schedule", method = RequestMethod.DELETE, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> delReportSchedule(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.delReportSchedule(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 94
+	@RequestMapping(value = "/editor/report/schedule/start", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> startReportSchedule(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.startReportSchedule(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 95
+	@RequestMapping(value = "/editor/report/schedule/shutdown", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> shutdownReportSchedule(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.shutdownReportSchedule(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 96
+	@RequestMapping(value = "/editor/report/schedule/mail", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initReportEmail(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.initReportEmail(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/report/schedule/hist", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getSchdHistList(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getRepoSchdHist(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	// 97
+	@RequestMapping(value = "/editor/report/data", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initRepoData(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.initRepoData(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/report/function", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> addRepoFunction(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.addRepoFunction(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/report/function", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> initRepoFunction(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.initRepoFunction(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/object/table/data", method = RequestMethod.GET, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> getTableData(HttpServletRequest request, @RequestParam Map<String, Object> requestMap) {
+		SessionContextHolder.remove();
+		Object result = editorService.getTableData(requestMap);
+		if(result instanceof Exception) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.BAD_REQUEST);
+		else if(result instanceof ErrorCodes) return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/result/save", method = RequestMethod.PATCH, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8"})
+	public ResponseEntity<?> saveEditResult(HttpServletRequest request, @RequestBody Map<String, Object> requestMap) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		PetraConnectionManager.getInstance().initDBConnection(requestMap);
+		
+		Object result = editorService.saveEditResult(requestMap);
+		if(result instanceof Exception) {
+			ExecuteResultDto resultData = new ExecuteResultDto();
+			resultData.setSQL_TYPE("SAVE");
+			resultData.setEXCEPTION((Exception)result);
+			resultData.setEXECUTE_MSG(((Exception)result).getMessage());
+			resultData.setEXECUTE_DATE(SQLTextUtil.getDate());
+			resultData.setEXECUTE_RESULT(-1);
+			resultData.setRESULT_CNT(0);
+			resultData.setELAPSE_TIME(0);
+			
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), resultData), HttpStatus.BAD_REQUEST);
+		}else if(result instanceof ErrorCodes) {
+			return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), ((ErrorCodes)result).getMap()), HttpStatus.BAD_REQUEST);
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), result), HttpStatus.OK);
+	}
+	
+	@RequestMapping(value = "/editor/image/render/file", method = RequestMethod.POST, produces= {"application/json;charset=UTF-8", "application/xml;charset=UTF-8", "text/plain;charset=UTF-8"})
+	public ResponseEntity<?> uploadCellImage(MultipartHttpServletRequest request, @RequestParam("uploadFile") MultipartFile[] uploadFile, @RequestParam("connectionInfo") String connectionInfo) {
+		SessionContextHolder.set(request.getSession(), request.getHeader("Authorization"));
+		
+		Map<String, Object> map = Converter.getInstance().convertJsonStrToMap(connectionInfo);
+		PetraConnectionManager.getInstance().initDBConnection(map);
+		
+		Map<String, Object> resultMap = new HashMap<>();
+		for(MultipartFile file : uploadFile) {
+			try {
+			String fileExt = file.getOriginalFilename().substring(file.getOriginalFilename().lastIndexOf(".") + 1);
+			String b64 = Base64.getEncoder().encodeToString(file.getBytes());
+			resultMap.put("IMG_B64", "data:image/"+fileExt+";base64, "+b64);
+			resultMap.put("ENCODE_IMG", file.getBytes());
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+		
+		return new ResponseEntity<>(Converter.getInstance().convert(request.getHeader("Accept"), resultMap), HttpStatus.OK);
+	}
+}
+
