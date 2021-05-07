@@ -26,6 +26,7 @@
   "dependencies": {
     "api-spec-converter": "^2.11.2",
     "axios": "^0.20.0",
+    "flora-sql-parser": "^0.9.4",
     "nodemon": "^2.0.6"
   }
 }
